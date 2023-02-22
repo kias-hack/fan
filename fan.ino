@@ -1,37 +1,99 @@
+/**
+ * Пины управления семисегментным индикатором
+ */
 #define dataPin 10
 #define clockPin 11
 #define latchPin 12
 
-#define fanPwmPin 9 // TODO сменить вывод управления феном
+#define fanPwmPin 9 // TODO сменить вывод управления вентилятором
 
+/**
+ * Пин с герконом
+ */
 #define reedSwitchPin 13
 
-#define dimmerPin A1
+/**
+ * Пин с термопарой и заземленным АЦП, чтобы компенсировать ноль АЦП
+ */
+#define thermoCouplePin 0// TODO указать порт
+#define groundedADCPin 0// TODO указать порт
 
+/**
+ * Пины для управления диммером
+ */
+#define dimmerPin A1
+#define zeroCrossPin 2
+#define zeroCrossInterrupt 0
+
+/**
+ * Пины обработки энкодера
+ */
 #define leftPin 4
 #define rightPin 5
 #define switchPin 6
 
-#define TICK_PERIOD 5 // период обновления дисплея и кнопок
-#define MIN_FAN_SPEED 1 // минимальная скорость
-#define MAX_FAN_SPEED 99 // максимальная скорость
+/**
+ * Настройки для диммера
+ */
+#define DIMMER_MAX_VALUE 2500 // 0.010 / (16000000 / 64) - максимальный период 9 миллисекунд, максимальное значение зависит от делителя
+#define DIMMER_WORK_VALUE DIMMER_MAX_VALUE - 100
+
+/**
+ * Период обновления дисплея и кнопок (кадры в сеунду умножаем на 3 сегмента)
+ */
+#define TICK_PERIOD 5 // период обновления дисплея и кнопок, мс
+
+/**
+ * Настройки отображения и урпвления скорости вентилятора
+ */
+#define MIN_FAN_SPEED 50 // минимальная скорость вентилятора в процентах
+#define MAX_FAN_SPEED 99 // максимальная скорость вентилятора в процентах
+
+/**
+ * Настройки для температуры фена
+ */
 #define MAX_TEMPERATURE 500 // максимальное значние температуры
 #define MIN_TEMPERATURE 100 // минимальное значние температуры
+#define DEFAULT_TEMPERATURE 300
 
+/**
+ * Коэффициенты термопары
+ */
+#define THERMO_GAIN 101.0
+#define ADC_REFERENCE 3.3
+#define ADC_RESOLUTION 1024.0
+#define VOLTS_PER_DEGREES_TYPE_K 0.000044
+#define ADC_COEF ADC_REFERENCE/ADC_RESOLUTION/THERMO_GAIN/VOLTS_PER_DEGREES_TYPE_K
+
+/**
+ * коэффициенты PID регулятора
+ */
+#define P_COEF 30
+#define I_COEF 0
+#define D_COEF 0
+
+/**
+ * Настройка, до какой температуры охлаждать фен когда сработает геркон
+ */
 #define COOLING_TEMPERATURE_LEVEL 50 // до какой температуры охлаждать
 
+/**
+ * Настройка, в течении какого времени показывать новое установленное значение
+ */
 #define NOTIFY_TIME 2 * 1000 // время показа измененного значения в секундах
 
 #include "kem3361.hpp";
+#include "pid.h";
 
 KEM3361 display(dataPin, clockPin, latchPin);
+PID pid(P_COEF, I_COEF, D_COEF, 0, DIMMER_WORK_VALUE);
 
-uint16_t target_temperature = 300;
-uint16_t temperature = 27;
+uint16_t target_temperature = DEFAULT_TEMPERATURE;
+uint16_t temperature;
 uint8_t fan_speed = MIN_FAN_SPEED;
 bool isNotifyActive = false;
-bool lastZeroCross;
-uint16_t dimmerValue = 9800;
+bool needComputePID = false;
+uint16_t dimmerValue = DIMMER_MAX_VALUE;
 unsigned long notifyTimer = millis();
 unsigned long tickTimer = millis();
 
@@ -93,15 +155,14 @@ struct buttons_t {
 void setup() {
   // инициализация Timer1
   cli(); // отключить глобальные прерывания
-  TCCR1A = 0; // установить TCCR1A регистр в 0
+  TCCR1A = 0;
   TCCR1B = 0;
   TCCR1B |= (1 << WGM12);
-  // включить прерывание Timer1 overflow:
   TIMSK1 = (1 << OCIE1A);
 
   sei();  // включить глобальные прерывания
   
-  Serial.begin(9600);
+//  Serial.begin(9600);
 
   pinMode(dataPin, OUTPUT);
   pinMode(clockPin, OUTPUT);
@@ -119,12 +180,12 @@ void setup() {
   buttons.last_left = digitalRead(leftPin);
   buttons.last_right = digitalRead(rightPin);
 
-  attachInterrupt(0, dimmerReset, RISING);
+  attachInterrupt(zeroCrossInterrupt, dimmerReset, RISING);
 }
 
 void dimmerReset(){
     digitalWrite(dimmerPin, LOW);
-    OCR1A = map(fan_speed, 0, 99, 2500, 0);
+    OCR1A = dimmerValue;
     TCCR1B |= (1 << WGM12) | (1 << CS11) | (1 << CS10);
 }
 
@@ -187,18 +248,38 @@ void tick()
   display.tick(); 
 }
 
+void getTemperature(){
+    int thermoCoupleRaw = analogRead(thermoCouplePin);
+    int groundedADCRaw = analogRead(groundedADCPin);
+
+    thermoCoupleRaw -= groundedADCRaw;
+
+    temperature = thermoCoupleRaw * ADC_COEF;
+}
+
 void loop(void) {
   if(digitalRead(reedSwitchPin))
   { 
-//    analogWrite(fanPwmPin, map(fan_speedб 0, MAX_FAN_SPEED, 0, 255));
+    if(needComputePID){
+      needComputePID = false;
+      getTemperature();
+      dimmerValue = DIMMER_WORK_VALUE - pid.compute(target_temperature - temperature);
+    }
+    analogWrite(fanPwmPin, map(fan_speed, 0, MAX_FAN_SPEED, 0, 255));
   } else 
   {
+    if(needComputePID){
+      needComputePID = false;
+      getTemperature();
+    }
+    
     if(temperature > COOLING_TEMPERATURE_LEVEL)
       analogWrite(fanPwmPin, map(fan_speed, 0, MAX_FAN_SPEED, 0, 255)); 
     else
       analogWrite(fanPwmPin, 0); 
 
     digitalWrite(dimmerPin, LOW);
+    uint16_t dimmerValue = DIMMER_MAX_VALUE;
   }
   
   if(millis() - tickTimer >= TICK_PERIOD)
