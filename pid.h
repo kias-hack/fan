@@ -12,40 +12,53 @@ class PID {
     double minValue;
     double maxValue;
     
-    double integral;
-    
     double lastError;
+    
     unsigned long lastTime;
   
     char sign(double);
 
   public:
+    double integral;
     PID(double, double, double, double, double);
-    double compute(double);
+    int compute(int);
+    void reset();
 };
 
-PID::PID(double P, double I, double D, double minValue, double maxValue) : P(P), I(I), D(D), minValue(minValue), maxValue(maxValue){}
+PID::PID(double P, double I, double D, double minValue, double maxValue) : P(P), I(I), D(D), minValue(minValue), maxValue(maxValue){
+  integral = 0;
+  lastError = 0;  
+}
+
+void PID::reset(){
+  integral = 0;
+  lastError= 0;
+  lastTime = millis();
+}
 
 char PID::sign(double v){
   if(v >= 0) return 1;
   return -1;
 }
 
-double PID::compute(double error) {
+int PID::compute(int error) {
   double dt = (millis() - lastTime) / 1000.0;
 
-  double valueP = error * P;
-
+  int valueP = error * P;
   double valueI = error * dt * I;
+  int valueD = (error - lastError) * D;
 
-  double valueD = (error - lastError) * D;
+  int pidValue = valueP + valueI + valueD + integral;
 
-  double valuePID = constrain(valueP + valueI + valueD, minValue, maxValue);
+  if(pidValue > maxValue) pidValue = maxValue;
+  if(pidValue < minValue) pidValue = minValue;
 
-  if(!((valuePID >= maxValue) && (sign(error) && sign(valuePID)))) {
+  if(!((pidValue >= maxValue) && (sign(error) && sign(pidValue)))) {
     integral += valueI;
   }
 
   lastError = error;
   lastTime = millis();
+
+  return pidValue;
 }
